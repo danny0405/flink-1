@@ -22,9 +22,11 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.table.api.TableColumn;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.types.utils.LegacyTypeInfoDataTypeConverter;
 import org.apache.flink.table.utils.EncodingUtils;
 import org.apache.flink.table.utils.TypeStringUtils;
 import org.apache.flink.util.InstantiationUtil;
@@ -71,6 +73,8 @@ public class DescriptorProperties {
 	public static final String TABLE_SCHEMA_NAME = "name";
 
 	public static final String TABLE_SCHEMA_TYPE = "type";
+
+	public static final String TABLE_SCHEMA_EXPR = "expr";
 
 	private static final Consumer<String> EMPTY_CONSUMER = (value) -> {};
 
@@ -183,15 +187,21 @@ public class DescriptorProperties {
 
 		final String[] fieldNames = schema.getFieldNames();
 		final TypeInformation<?>[] fieldTypes = schema.getFieldTypes();
+		final String[] fieldExpressions = Arrays.stream(schema.getTableColumns())
+			.map(TableColumn::getSerializedExpr).toArray(String[]::new);
 
 		final List<List<String>> values = new ArrayList<>();
 		for (int i = 0; i < schema.getFieldCount(); i++) {
-			values.add(Arrays.asList(fieldNames[i], TypeStringUtils.writeTypeInfo(fieldTypes[i])));
+			values.add(
+				Arrays.asList(
+					fieldNames[i],
+					TypeStringUtils.writeTypeInfo(fieldTypes[i]),
+					fieldExpressions[i]));
 		}
 
-		putIndexedFixedProperties(
+		putIndexedOptionalProperties(
 			key,
-			Arrays.asList(TABLE_SCHEMA_NAME, TABLE_SCHEMA_TYPE),
+			Arrays.asList(TABLE_SCHEMA_NAME, TABLE_SCHEMA_TYPE, TABLE_SCHEMA_EXPR),
 			values);
 	}
 
@@ -227,6 +237,43 @@ public class DescriptorProperties {
 			}
 			for (int keyIdx = 0; keyIdx < values.size(); keyIdx++) {
 				put(key + '.' + idx + '.' + subKeys.get(keyIdx), values.get(keyIdx));
+			}
+		}
+	}
+
+	/**
+	 * Adds an indexed sequence of properties (with sub-properties) under a common key.
+	 * Different with {@link #putIndexedFixedProperties}, this method supports the properties
+	 * value to be null, which would be ignore. The sub-properties should at least have
+	 * one non-null value.
+	 *
+	 * <p>For example:
+	 *
+	 * <pre>
+	 *     schema.fields.0.type = INT, schema.fields.0.name = test
+	 *     schema.fields.1.type = LONG, schema.fields.1.name = test2
+	 *     schema.fields.2.type = LONG, schema.fields.1.expr = test + 1
+	 * </pre>
+	 *
+	 * <p>The arity of each subKeyValues must match the arity of propertyKeys.
+	 */
+	public void putIndexedOptionalProperties(String key, List<String> subKeys, List<List<String>> subKeyValues) {
+		checkNotNull(key);
+		checkNotNull(subKeys);
+		checkNotNull(subKeyValues);
+		for (int idx = 0; idx < subKeyValues.size(); idx++) {
+			final List<String> values = subKeyValues.get(idx);
+			if (values == null || values.size() != subKeys.size()) {
+				throw new ValidationException("Values must have same arity as keys.");
+			}
+			if (values.stream().allMatch(Objects::isNull)) {
+				throw new ValidationException("Values must have at least one non-null value.");
+			}
+			for (int keyIdx = 0; keyIdx < values.size(); keyIdx++) {
+				String value = values.get(keyIdx);
+				if (value != null) {
+					put(key + '.' + idx + '.' + subKeys.get(keyIdx), values.get(keyIdx));
+				}
 			}
 		}
 	}
@@ -510,6 +557,7 @@ public class DescriptorProperties {
 		for (int i = 0; i < fieldCount; i++) {
 			final String nameKey = key + '.' + i + '.' + TABLE_SCHEMA_NAME;
 			final String typeKey = key + '.' + i + '.' + TABLE_SCHEMA_TYPE;
+			final String exprKey = key + '.' + i + '.' + TABLE_SCHEMA_EXPR;
 
 			final String name = optionalGet(nameKey).orElseThrow(exceptionSupplier(nameKey));
 
@@ -517,7 +565,16 @@ public class DescriptorProperties {
 				.map(TypeStringUtils::readTypeInfo)
 				.orElseThrow(exceptionSupplier(typeKey));
 
-			schemaBuilder.field(name, type);
+			final Optional<String> expr = optionalGet(exprKey);
+			if (expr.isPresent()) {
+				schemaBuilder.field(
+					name,
+					new TableColumn.ColumnExpression(
+						expr.get(),
+						LegacyTypeInfoDataTypeConverter.toDataType(type)));
+			} else {
+				schemaBuilder.field(name, type);
+			}
 		}
 		return Optional.of(schemaBuilder.build());
 	}

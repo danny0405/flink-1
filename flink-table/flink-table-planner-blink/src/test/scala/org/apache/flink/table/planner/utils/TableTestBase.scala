@@ -1022,12 +1022,12 @@ object TableTestUtil {
   }
 
   def registerDataStream[T](
-      tEnv: TableEnvironment,
-      name: String,
-      dataStream: DataStream[T],
-      fields: Option[Array[Expression]] = None,
-      fieldNullables: Option[Array[Boolean]] = None,
-      statistic: Option[FlinkStatistic] = None): Unit = {
+    tEnv: TableEnvironment,
+    name: String,
+    dataStream: DataStream[T],
+    fields: Option[Array[Expression]] = None,
+    fieldNullables: Option[Array[Boolean]] = None,
+    statistic: Option[FlinkStatistic] = None): Unit = {
     val planner = tEnv.asInstanceOf[TableEnvironmentImpl].getPlanner.asInstanceOf[PlannerBase]
     val execEnv = planner.getExecEnv
     val streamType = dataStream.getType
@@ -1046,11 +1046,25 @@ object TableTestUtil {
     }).getOrElse(FieldInfoUtils.getFieldsInfo(streamType))
 
     val fieldCnt = typeInfoSchema.getFieldTypes.length
+    // Fix nullable attribute.
+    var tableSchema = typeInfoSchema.toTableSchema
+    val fixedNullables = fieldNullables.getOrElse(Array.fill[Boolean](fieldCnt)(true))
+    val fieldTypes = tableSchema.getFieldDataTypes
+      .zip(fixedNullables)
+      .map {
+        case(dt, nullable) =>
+          if (nullable) {
+            dt.nullable()
+          } else {
+            dt.notNull()
+          }
+      }
+    tableSchema = TableSchema.builder().fields(tableSchema.getFieldNames, fieldTypes).build()
     val dataStreamQueryOperation = new DataStreamQueryOperation(
       dataStream,
       typeInfoSchema.getIndices,
-      typeInfoSchema.toTableSchema,
-      fieldNullables.getOrElse(Array.fill(fieldCnt)(true)),
+      tableSchema,
+      fixedNullables,
       false,
       false,
       statistic.getOrElse(FlinkStatistic.UNKNOWN)

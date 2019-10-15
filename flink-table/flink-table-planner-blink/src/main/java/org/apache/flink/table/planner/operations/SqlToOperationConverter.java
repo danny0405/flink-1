@@ -23,6 +23,7 @@ import org.apache.flink.sql.parser.ddl.SqlDropTable;
 import org.apache.flink.sql.parser.ddl.SqlTableColumn;
 import org.apache.flink.sql.parser.ddl.SqlTableOption;
 import org.apache.flink.sql.parser.dml.RichSqlInsert;
+import org.apache.flink.table.api.TableColumn;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.catalog.CatalogTable;
@@ -33,8 +34,9 @@ import org.apache.flink.table.operations.ddl.CreateTableOperation;
 import org.apache.flink.table.operations.ddl.DropTableOperation;
 import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
-import org.apache.flink.table.planner.calcite.FlinkTypeSystem;
+import org.apache.flink.table.planner.calcite.SqlToRexConverter;
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter;
+import org.apache.flink.table.types.DataType;
 
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.type.RelDataType;
@@ -116,8 +118,7 @@ public class SqlToOperationConverter {
 					((SqlTableOption) p).getValueString()));
 		}
 
-		TableSchema tableSchema = createTableSchema(sqlCreateTable,
-			new FlinkTypeFactory(new FlinkTypeSystem())); // need to make type factory singleton ?
+		TableSchema tableSchema = createTableSchema(sqlCreateTable, flinkPlanner.typeFactory());
 		String tableComment = "";
 		if (sqlCreateTable.getComment() != null) {
 			tableComment = sqlCreateTable.getComment().getNlsString().getValue();
@@ -178,33 +179,57 @@ public class SqlToOperationConverter {
 	 *
 	 * <p>The returned table schema contains columns (a:int, b:varchar, c:timestamp).
 	 *
-	 * @param sqlCreateTable sql create table node.
-	 * @param factory        FlinkTypeFactory instance.
+	 * @param sqlCreateTable sql create table node
+	 * @param typeFactory    FlinkTypeFactory instance
 	 * @return TableSchema
 	 */
 	private TableSchema createTableSchema(SqlCreateTable sqlCreateTable,
-			FlinkTypeFactory factory) {
+			FlinkTypeFactory typeFactory) {
 		// setup table columns
 		SqlNodeList columnList = sqlCreateTable.getColumnList();
-		TableSchema physicalSchema = null;
-		TableSchema.Builder builder = new TableSchema.Builder();
+		final List<String> physicalNames = new ArrayList<>();
+		final List<RelDataType> physicalTypes = new ArrayList<>();
 		// collect the physical table schema first.
 		final List<SqlNode> physicalColumns = columnList.getList().stream()
 			.filter(n -> n instanceof SqlTableColumn).collect(Collectors.toList());
 		for (SqlNode node : physicalColumns) {
 			SqlTableColumn column = (SqlTableColumn) node;
-			final RelDataType relType = column.getType().deriveType(factory,
+			final RelDataType relType = column.getType().deriveType(typeFactory,
 				column.getType().getNullable());
-			builder.field(column.getName().getSimple(),
-				LogicalTypeDataTypeConverter.fromLogicalTypeToDataType(
-					FlinkTypeFactory.toLogicalType(relType)));
-			physicalSchema = builder.build();
+			physicalNames.add(column.getName().getSimple());
+			physicalTypes.add(relType);
 		}
-		assert physicalSchema != null;
-		if (sqlCreateTable.containsComputedColumn()) {
-			throw new SqlConversionException("Computed columns for DDL is not supported yet!");
+		if (!sqlCreateTable.containsComputedColumn()) {
+			final TableSchema.Builder builder = new TableSchema.Builder();
+			for (int i = 0; i < physicalNames.size(); i++) {
+				builder.field(physicalNames.get(i),
+					LogicalTypeDataTypeConverter.fromLogicalTypeToDataType(
+						FlinkTypeFactory.toLogicalType(physicalTypes.get(i))));
+			}
+			return builder.build();
+		} else {
+			final RelDataType rowType = typeFactory.createStructType(physicalTypes, physicalNames);
+			final SqlToRexConverter sqlToRexConverter = flinkPlanner.createSqlToRexConverter(rowType);
+			final RelDataType logicalRowType = sqlToRexConverter
+				.getExpressionRowType(sqlCreateTable.getColumnSqlString());
+			// Reset the builder.
+			final TableSchema.Builder builder = new TableSchema.Builder();
+			final Map<String, String> computedColumnMap =
+				sqlCreateTable.getComputedColumnMap();
+			logicalRowType.getFieldList().forEach(field -> {
+				final String fieldName = field.getName();
+				final DataType fieldType = LogicalTypeDataTypeConverter.fromLogicalTypeToDataType(
+					FlinkTypeFactory.toLogicalType(field.getType()));
+				if (computedColumnMap.containsKey(fieldName)) {
+					builder.field(
+						fieldName,
+						new TableColumn.ColumnExpression(computedColumnMap.get(fieldName), fieldType));
+				} else {
+					builder.field(fieldName, fieldType);
+				}
+			});
+			return builder.build();
 		}
-		return physicalSchema;
 	}
 
 	private PlannerQueryOperation toQueryOperation(FlinkPlannerImpl planner, SqlNode validated) {

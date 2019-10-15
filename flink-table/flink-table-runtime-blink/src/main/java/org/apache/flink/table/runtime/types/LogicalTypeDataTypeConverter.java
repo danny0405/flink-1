@@ -71,36 +71,40 @@ public class LogicalTypeDataTypeConverter {
 
 		@Override
 		protected LogicalType defaultMethod(LogicalType logicalType) {
+			LogicalType legacyType = null;
 			if (logicalType instanceof LegacyTypeInformationType) {
 				TypeInformation typeInfo = ((LegacyTypeInformationType) logicalType).getTypeInformation();
 				if (typeInfo.equals(BasicTypeInfo.BIG_DEC_TYPE_INFO)) {
 					// BigDecimal have infinity precision and scale, but we converted it into a limited
 					// Decimal(38, 18). If the user's BigDecimal is more precision than this, we will
 					// throw Exception to remind user to use GenericType in real data conversion.
-					return Decimal.DECIMAL_SYSTEM_DEFAULT;
+					legacyType = Decimal.DECIMAL_SYSTEM_DEFAULT;
 				} else if (typeInfo.equals(BinaryStringTypeInfo.INSTANCE)) {
-					return DataTypes.STRING().getLogicalType();
+					legacyType = DataTypes.STRING().getLogicalType();
 				} else if (typeInfo instanceof BasicArrayTypeInfo) {
-					return new ArrayType(
-							fromTypeInfoToLogicalType(((BasicArrayTypeInfo) typeInfo).getComponentInfo()));
+					legacyType = new ArrayType(
+						fromTypeInfoToLogicalType(((BasicArrayTypeInfo) typeInfo).getComponentInfo()));
 				} else if (typeInfo instanceof CompositeType) {
 					CompositeType compositeType = (CompositeType) typeInfo;
-					return RowType.of(
-							Stream.iterate(0, x -> x + 1).limit(compositeType.getArity())
-									.map((Function<Integer, TypeInformation>) compositeType::getTypeAt)
-									.map(TypeInfoLogicalTypeConverter::fromTypeInfoToLogicalType)
-									.toArray(LogicalType[]::new),
-							compositeType.getFieldNames()
-					);
+					legacyType = RowType.of(
+						Stream.iterate(0, x -> x + 1).limit(compositeType.getArity())
+							.map((Function<Integer, TypeInformation>) compositeType::getTypeAt)
+							.map(TypeInfoLogicalTypeConverter::fromTypeInfoToLogicalType)
+							.toArray(LogicalType[]::new),
+						compositeType.getFieldNames())
+						.copy(logicalType.isNullable());
 				} else if (typeInfo instanceof DecimalTypeInfo) {
 					DecimalTypeInfo decimalType = (DecimalTypeInfo) typeInfo;
-					return new DecimalType(decimalType.precision(), decimalType.scale());
+					legacyType = new DecimalType(decimalType.precision(), decimalType.scale());
 				} else if (typeInfo instanceof BigDecimalTypeInfo) {
 					BigDecimalTypeInfo decimalType = (BigDecimalTypeInfo) typeInfo;
-					return new DecimalType(decimalType.precision(), decimalType.scale());
+					legacyType = new DecimalType(decimalType.precision(), decimalType.scale());
 				} else {
-					return new TypeInformationAnyType<>(typeInfo);
+					legacyType = new TypeInformationAnyType<>(typeInfo);
 				}
+			}
+			if (legacyType != null) {
+				return legacyType.copy(logicalType.isNullable());
 			} else {
 				return logicalType;
 			}
@@ -109,34 +113,34 @@ public class LogicalTypeDataTypeConverter {
 		@Override
 		public LogicalType visit(ArrayType arrayType) {
 			return new ArrayType(
-					arrayType.isNullable(),
-					arrayType.getElementType().accept(this));
+				arrayType.isNullable(),
+				arrayType.getElementType().accept(this));
 		}
 
 		@Override
 		public LogicalType visit(MultisetType multisetType) {
 			return new MultisetType(
-					multisetType.isNullable(),
-					multisetType.getElementType().accept(this));
+				multisetType.isNullable(),
+				multisetType.getElementType().accept(this));
 		}
 
 		@Override
 		public LogicalType visit(MapType mapType) {
 			return new MapType(
-					mapType.isNullable(),
-					mapType.getKeyType().accept(this),
-					mapType.getValueType().accept(this));
+				mapType.isNullable(),
+				mapType.getKeyType().accept(this),
+				mapType.getValueType().accept(this));
 		}
 
 		@Override
 		public LogicalType visit(RowType rowType) {
 			return new RowType(
-					rowType.isNullable(),
-					rowType.getFields().stream().map(field ->
-							new RowType.RowField(
-									field.getName(),
-									field.getType().accept(LegacyTypeToPlannerTypeConverter.this)))
-							.collect(Collectors.toList()));
+				rowType.isNullable(),
+				rowType.getFields().stream().map(field ->
+					new RowType.RowField(
+						field.getName(),
+						field.getType().accept(LegacyTypeToPlannerTypeConverter.this)))
+					.collect(Collectors.toList()));
 		}
 	}
 }

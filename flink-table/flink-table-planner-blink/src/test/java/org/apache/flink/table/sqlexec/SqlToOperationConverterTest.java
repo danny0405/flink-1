@@ -21,6 +21,7 @@ package org.apache.flink.table.sqlexec;
 import org.apache.flink.sql.parser.ddl.SqlCreateTable;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.SqlDialect;
+import org.apache.flink.table.api.TableColumn;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.catalog.Catalog;
@@ -327,6 +328,45 @@ public class SqlToOperationConverterTest {
 		TableSchema schema = ((CreateTableOperation) operation).getCatalogTable().getSchema();
 		Object[] expectedDataTypes = testItems.stream().map(item -> item.expectedType).toArray();
 		assertArrayEquals(expectedDataTypes, schema.getFieldDataTypes());
+	}
+
+	@Test
+	public void testCreateTableWithComputedColumn() {
+		final String sql = "CREATE TABLE tbl1 (\n" +
+			"  a bigint,\n" +
+			"  b varchar, \n" +
+			"  c as a - 1, \n" +
+			"  d as b || '$$'" +
+			")\n" +
+			"  with (\n" +
+			"    'connector' = 'kafka', \n" +
+			"    'kafka.topic' = 'log.test'\n" +
+			")\n";
+		FlinkPlannerImpl planner = getPlannerBySqlDialect(SqlDialect.DEFAULT);
+		Operation operation = parse(sql, planner);
+		assert operation instanceof CreateTableOperation;
+		CreateTableOperation op = (CreateTableOperation) operation;
+		CatalogTable catalogTable = op.getCatalogTable();
+		assertArrayEquals(
+			new String[] {"a", "b", "c", "d"},
+			catalogTable.getSchema().getFieldNames());
+		assertArrayEquals(
+			new DataType[]{
+				DataTypes.BIGINT(),
+				DataTypes.VARCHAR(Integer.MAX_VALUE),
+				DataTypes.BIGINT(),
+				DataTypes.VARCHAR(Integer.MAX_VALUE)},
+			catalogTable.getSchema().getFieldDataTypes());
+		TableColumn.ColumnExpression[] columnExpressions =
+			Arrays.stream(catalogTable.getSchema().getTableColumns())
+				.filter(TableColumn::isVirtual)
+				.map(TableColumn::getExpr)
+				.toArray(TableColumn.ColumnExpression[]::new);
+		assertArrayEquals(
+			new TableColumn.ColumnExpression[] {
+				new TableColumn.ColumnExpression("a - 1", DataTypes.BIGINT()),
+				new TableColumn.ColumnExpression("b || '$$'", DataTypes.STRING())},
+			columnExpressions);
 	}
 
 	//~ Tool Methods ----------------------------------------------------------

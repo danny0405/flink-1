@@ -21,10 +21,12 @@ package org.apache.flink.sql.parser.ddl;
 import org.apache.flink.sql.parser.ExtendedSqlNode;
 import org.apache.flink.sql.parser.error.SqlParseException;
 
+import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCharStringLiteral;
 import org.apache.calcite.sql.SqlCreate;
+import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
@@ -38,8 +40,10 @@ import org.apache.calcite.sql.pretty.SqlPrettyWriter;
 import org.apache.calcite.util.ImmutableNullableList;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
@@ -231,6 +235,40 @@ public class SqlCreateTable extends SqlCreate implements ExtendedSqlNode {
 		}
 
 		return writer.toString();
+	}
+
+	/** Split the computed columns expression into string key-value pairs.
+	 *
+	 * <p>For example, {@code col2 as to_timestamp(col1)} would be split into pair:
+	 * (col2, to_timestamp(col1)).
+	 *
+	 * @return computed column name and expression mapping
+	 **/
+	public Map<String, String> getComputedColumnMap() {
+		Map<String, String> map = new HashMap<>();
+		final SqlDialect dialect = new AnsiSqlDialect(SqlDialect.EMPTY_CONTEXT
+			.withUnquotedCasing(Casing.UNCHANGED)
+			.withQuotedCasing(Casing.UNCHANGED)
+			.withIdentifierQuoteString("`")
+			.withDatabaseProduct(SqlDialect.DatabaseProduct.UNKNOWN));
+		final SqlPrettyWriter writer = new SqlPrettyWriter(dialect);
+		writer.setAlwaysUseParentheses(false);
+		writer.setIndentation(0);
+		writer.setQuoteAllIdentifiers(false);
+		for (SqlNode column : columnList) {
+			if (column instanceof SqlBasicCall
+				&& column.getKind() == SqlKind.AS) {
+				SqlBasicCall call = (SqlBasicCall) column;
+				call.operand(0).unparse(writer, 0, 0);
+				String v = writer.toString();
+				// Use toString instead of #unparse to avoid the quotes.
+				String k = call.operand(1).toString();
+				map.put(k, v);
+				// Reset the writer.
+				writer.reset();
+			}
+		}
+		return map;
 	}
 
 	@Override

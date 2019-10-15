@@ -422,7 +422,7 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInvalidComputedColumn() {
-		checkFails("CREATE TABLE sls_stream (\n" +
+		final String sql0 = "CREATE TABLE t1 (\n" +
 			"  a bigint, \n" +
 			"  b varchar,\n" +
 			"  toTimestamp^(^b, 'yyyy-MM-dd HH:mm:ss'), \n" +
@@ -430,11 +430,25 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 			") with (\n" +
 			"  'x' = 'y', \n" +
 			"  'asd' = 'data'\n" +
-			")\n", "(?s).*Encountered \"\\(\" at line 4, column 14.\n" +
+			")\n";
+		final String expect0 = "(?s).*Encountered \"\\(\" at line 4, column 14.\n" +
 			"Was expecting one of:\n" +
 			"    \"AS\" ...\n" +
 			"    \"ARRAY\" ...\n" +
-			".*");
+			".*";
+		checkFails(sql0, expect0);
+		// Sub-query computed column expression is forbidden.
+		final String sql1 = "CREATE TABLE t1 (\n" +
+			"  a bigint, \n" +
+			"  b varchar,\n" +
+			"  c as ^(^select max(d) from t2), \n" +
+			"  PRIMARY KEY (a, b) \n" +
+			") with (\n" +
+			"  'x' = 'y', \n" +
+			"  'asd' = 'data'\n" +
+			")\n";
+		final String expect1 = "(?s).*Query expression encountered in illegal context.*";
+		checkFails(sql1, expect1);
 	}
 
 	@Test

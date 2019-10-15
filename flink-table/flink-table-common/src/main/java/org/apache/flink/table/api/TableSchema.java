@@ -21,6 +21,7 @@ package org.apache.flink.table.api;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.CompositeType;
+import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.flink.types.Row;
@@ -32,8 +33,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.apache.flink.table.api.DataTypes.FIELD;
@@ -50,36 +53,21 @@ public class TableSchema {
 
 	private static final String ATOMIC_TYPE_FIELD_NAME = "f0";
 
-	private final String[] fieldNames;
-
-	private final DataType[] fieldDataTypes;
-
+	private final TableColumn[] columns;
 	private final Map<String, Integer> fieldNameToIndex;
 
-	private TableSchema(String[] fieldNames, DataType[] fieldDataTypes) {
-		this.fieldNames = Preconditions.checkNotNull(fieldNames);
-		this.fieldDataTypes = Preconditions.checkNotNull(fieldDataTypes);
-
-		if (fieldNames.length != fieldDataTypes.length) {
-			throw new TableException(
-				"Number of field names and field data types must be equal.\n" +
-					"Number of names is " + fieldNames.length + ", number of data types is " + fieldDataTypes.length + ".\n" +
-					"List of field names: " + Arrays.toString(fieldNames) + "\n" +
-					"List of field data types: " + Arrays.toString(fieldDataTypes));
-		}
+	private TableSchema(TableColumn[] columns) {
+		this.columns = Preconditions.checkNotNull(columns);
 
 		// validate and create name to index mapping
+		final String[] fieldNames = getFieldNames();
 		fieldNameToIndex = new HashMap<>();
 		final Set<String> duplicateNames = new HashSet<>();
 		final Set<String> uniqueNames = new HashSet<>();
 		for (int i = 0; i < fieldNames.length; i++) {
-			// check for null
-			Preconditions.checkNotNull(fieldDataTypes[i]);
-			final String fieldName = Preconditions.checkNotNull(fieldNames[i]);
-
+			final String fieldName = fieldNames[i];
 			// collect indices
 			fieldNameToIndex.put(fieldName, i);
-
 			// check uniqueness of field names
 			if (uniqueNames.contains(fieldName)) {
 				duplicateNames.add(fieldName);
@@ -100,21 +88,45 @@ public class TableSchema {
 	 */
 	@Deprecated
 	public TableSchema(String[] fieldNames, TypeInformation<?>[] fieldTypes) {
-		this(fieldNames, fromLegacyInfoToDataType(fieldTypes));
+		this(getTableColumns(fieldNames, fieldTypes));
+	}
+
+	/**
+	 * Tools method to transform arrays of table names and types
+	 * into a {@link TableColumn} array.
+	 */
+	private static TableColumn[] getTableColumns(
+		String[] fieldNames,
+		TypeInformation<?>[] fieldTypes) {
+		DataType[] fieldDataTypes = fromLegacyInfoToDataType(fieldTypes);
+		if (fieldNames.length != fieldDataTypes.length) {
+			throw new TableException(
+				"Number of field names and field data types must be equal.\n" +
+					"Number of names is " + fieldNames.length + ", number of data types is " + fieldTypes.length + ".\n" +
+					"List of field names: " + Arrays.toString(fieldNames) + "\n" +
+					"List of field data types: " + Arrays.toString(fieldDataTypes));
+		}
+		TableColumn[] columns = new TableColumn[fieldNames.length];
+		for (int i = 0; i < fieldNames.length; i++) {
+			columns[i] = TableColumn.of(fieldNames[i], fieldDataTypes[i]);
+		}
+		return columns;
 	}
 
 	/**
 	 * Returns a deep copy of the table schema.
 	 */
 	public TableSchema copy() {
-		return new TableSchema(fieldNames.clone(), fieldDataTypes.clone());
+		return new TableSchema(columns.clone());
 	}
 
 	/**
 	 * Returns all field data types as an array.
 	 */
 	public DataType[] getFieldDataTypes() {
-		return fieldDataTypes;
+		return Arrays.stream(columns)
+			.map(TableColumn::getType)
+			.toArray(DataType[]::new);
 	}
 
 	/**
@@ -126,7 +138,7 @@ public class TableSchema {
 	 */
 	@Deprecated
 	public TypeInformation<?>[] getFieldTypes() {
-		return fromDataTypeToLegacyInfo(fieldDataTypes);
+		return fromDataTypeToLegacyInfo(getFieldDataTypes());
 	}
 
 	/**
@@ -135,10 +147,10 @@ public class TableSchema {
 	 * @param fieldIndex the index of the field
 	 */
 	public Optional<DataType> getFieldDataType(int fieldIndex) {
-		if (fieldIndex < 0 || fieldIndex >= fieldDataTypes.length) {
+		if (fieldIndex < 0 || fieldIndex >= columns.length) {
 			return Optional.empty();
 		}
-		return Optional.of(fieldDataTypes[fieldIndex]);
+		return Optional.of(columns[fieldIndex].getType());
 	}
 
 	/**
@@ -161,7 +173,7 @@ public class TableSchema {
 	 */
 	public Optional<DataType> getFieldDataType(String fieldName) {
 		if (fieldNameToIndex.containsKey(fieldName)) {
-			return Optional.of(fieldDataTypes[fieldNameToIndex.get(fieldName)]);
+			return Optional.of(columns[fieldNameToIndex.get(fieldName)].getType());
 		}
 		return Optional.empty();
 	}
@@ -183,14 +195,16 @@ public class TableSchema {
 	 * Returns the number of fields.
 	 */
 	public int getFieldCount() {
-		return fieldNames.length;
+		return columns.length;
 	}
 
 	/**
 	 * Returns all field names as an array.
 	 */
 	public String[] getFieldNames() {
-		return fieldNames;
+		return Arrays.stream(columns)
+			.map(TableColumn::getName)
+			.toArray(String[]::new);
 	}
 
 	/**
@@ -199,18 +213,49 @@ public class TableSchema {
 	 * @param fieldIndex the index of the field
 	 */
 	public Optional<String> getFieldName(int fieldIndex) {
-		if (fieldIndex < 0 || fieldIndex >= fieldNames.length) {
+		if (fieldIndex < 0 || fieldIndex >= columns.length) {
 			return Optional.empty();
 		}
-		return Optional.of(fieldNames[fieldIndex]);
+		return Optional.of(columns[fieldIndex].getName());
+	}
+
+	/**
+	 * Returns the {@link TableColumn} instance for the given field index.
+	 *
+	 * @param fieldIndex the index of the field
+	 */
+	public Optional<TableColumn> getTableColumn(int fieldIndex) {
+		if (fieldIndex < 0 || fieldIndex >= columns.length) {
+			return Optional.empty();
+		}
+		return Optional.of(columns[fieldIndex]);
+	}
+
+	/**
+	 * Returns the {@link TableColumn} instance for the given field name.
+	 *
+	 * @param fieldName the name of the field
+	 */
+	public Optional<TableColumn> getTableColumn(String fieldName) {
+		if (fieldNameToIndex.containsKey(fieldName)) {
+			return Optional.of(columns[fieldNameToIndex.get(fieldName)]);
+		}
+		return Optional.empty();
+	}
+
+	/**
+	 * Returns all the {@link TableColumn}s for this table schema.
+	 */
+	public TableColumn[] getTableColumns() {
+		return this.columns.clone();
 	}
 
 	/**
 	 * Converts a table schema into a (nested) data type describing a {@link DataTypes#ROW(Field...)}.
 	 */
 	public DataType toRowDataType() {
-		final Field[] fields = IntStream.range(0, fieldDataTypes.length)
-			.mapToObj(i -> FIELD(fieldNames[i], fieldDataTypes[i]))
+		final Field[] fields = Arrays.stream(columns)
+			.map(column -> FIELD(column.getName(), column.getType()))
 			.toArray(Field[]::new);
 		return ROW(fields);
 	}
@@ -228,8 +273,16 @@ public class TableSchema {
 	public String toString() {
 		final StringBuilder sb = new StringBuilder();
 		sb.append("root\n");
-		for (int i = 0; i < fieldNames.length; i++) {
-			sb.append(" |-- ").append(fieldNames[i]).append(": ").append(fieldDataTypes[i]).append('\n');
+		for (int i = 0; i < columns.length; i++) {
+			sb.append(" |-- ")
+				.append(getFieldName(i))
+				.append(": ");
+			if (columns[i].isVirtual()) {
+				sb.append(columns[i].getExpr().asSummaryString());
+			} else {
+				sb.append(getFieldDataType(i));
+			}
+			sb.append('\n');
 		}
 		return sb.toString();
 	}
@@ -243,15 +296,12 @@ public class TableSchema {
 			return false;
 		}
 		TableSchema schema = (TableSchema) o;
-		return Arrays.equals(fieldNames, schema.fieldNames) &&
-			Arrays.equals(fieldDataTypes, schema.fieldDataTypes);
+		return Arrays.equals(columns, schema.columns);
 	}
 
 	@Override
 	public int hashCode() {
-		int result = Arrays.hashCode(fieldNames);
-		result = 31 * result + Arrays.hashCode(fieldDataTypes);
-		return result;
+		return Objects.hash(columns);
 	}
 
 	/**
@@ -295,13 +345,10 @@ public class TableSchema {
 	 */
 	public static class Builder {
 
-		private List<String> fieldNames;
-
-		private List<DataType> fieldDataTypes;
+		private List<TableColumn> columns;
 
 		public Builder() {
-			fieldNames = new ArrayList<>();
-			fieldDataTypes = new ArrayList<>();
+			columns = new ArrayList<>();
 		}
 
 		/**
@@ -312,8 +359,20 @@ public class TableSchema {
 		public Builder field(String name, DataType dataType) {
 			Preconditions.checkNotNull(name);
 			Preconditions.checkNotNull(dataType);
-			fieldNames.add(name);
-			fieldDataTypes.add(dataType);
+			columns.add(TableColumn.of(name, dataType));
+			return this;
+		}
+
+		/**
+		 * Add a field with name and computation expression.
+		 * This column would be a computed column.
+		 *
+		 * <p>The call order of this method determines the order of fields in the schema.
+		 */
+		public Builder field(String name, Expression dataType) {
+			Preconditions.checkNotNull(name);
+			Preconditions.checkNotNull(dataType);
+			columns.add(TableColumn.of(name, dataType));
 			return this;
 		}
 
@@ -325,9 +384,17 @@ public class TableSchema {
 		public Builder fields(String[] names, DataType[] dataTypes) {
 			Preconditions.checkNotNull(names);
 			Preconditions.checkNotNull(dataTypes);
-
-			fieldNames.addAll(Arrays.asList(names));
-			fieldDataTypes.addAll(Arrays.asList(dataTypes));
+			if (names.length != dataTypes.length) {
+				throw new TableException(
+					"Number of field names and field data types must be equal.\n" +
+						"Number of names is " + names.length + ", number of data types is " + dataTypes.length + ".\n" +
+						"List of field names: " + Arrays.toString(names) + "\n" +
+						"List of field data types: " + Arrays.toString(dataTypes));
+			}
+			List<TableColumn> columns = IntStream.range(0, names.length)
+				.mapToObj(idx -> TableColumn.of(names[idx], dataTypes[idx]))
+				.collect(Collectors.toList());
+			this.columns.addAll(columns);
 			return this;
 		}
 
@@ -347,9 +414,7 @@ public class TableSchema {
 		 * Returns a {@link TableSchema} instance.
 		 */
 		public TableSchema build() {
-			return new TableSchema(
-				fieldNames.toArray(new String[0]),
-				fieldDataTypes.toArray(new DataType[0]));
+			return new TableSchema(columns.toArray(new TableColumn[0]));
 		}
 	}
 }

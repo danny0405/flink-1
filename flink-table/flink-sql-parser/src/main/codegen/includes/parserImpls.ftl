@@ -54,7 +54,7 @@ void ComputedColumn(TableCreationContext context) :
 {
     identifier = SimpleIdentifier() {pos = getPos();}
     <AS>
-    expr = Expression(ExprContext.ACCEPT_SUB_QUERY) {
+    expr = Expression(ExprContext.ACCEPT_NON_QUERY) {
         expr = SqlStdOperatorTable.AS.createCall(Span.of(identifier, expr).pos(), expr, identifier);
         context.columnList.add(expr);
     }
